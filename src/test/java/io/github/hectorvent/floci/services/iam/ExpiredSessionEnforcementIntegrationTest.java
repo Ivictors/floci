@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.UUID;
@@ -18,7 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
 /**
- * With enforcement on, a session past its expiration is answered with AWS's
+ * With enforcement on, a session past its expiration on the injected clock is answered with AWS's
  * {@code ExpiredTokenException}, not as a key that exists nowhere, on every call and every time.
  */
 @QuarkusTest
@@ -30,6 +32,9 @@ class ExpiredSessionEnforcementIntegrationTest {
 
     @Inject
     IamService iamService;
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -89,11 +94,28 @@ class ExpiredSessionEnforcementIntegrationTest {
                 .then().statusCode(403).body(containsString("<Code>ExpiredTokenException</Code>"));
     }
 
+    @Test
+    void aSessionIsLiveUntilTheInjectedClockPassesItsExpiry() {
+        // AWS Sign-In stamps its sessions' expiry from the injected clock, so enforcement measures
+        // it on that clock too. On the system clock such a session read as expired once issued.
+        String accessKeyId = sessionExpiringAt(clock.instant().plus(Duration.ofMinutes(15)));
+
+        getCallerIdentity(accessKeyId).then().statusCode(200);
+
+        clock.advance(Duration.ofMinutes(16));
+        getCallerIdentity(accessKeyId)
+                .then().statusCode(403).body(containsString("<Code>ExpiredTokenException</Code>"));
+    }
+
     private String expiredSession() {
-        String accessKeyId = "ASIAEXPIRED"
+        return sessionExpiringAt(LONG_AGO);
+    }
+
+    private String sessionExpiringAt(Instant expiration) {
+        String accessKeyId = "ASIASESSION"
                 + UUID.randomUUID().toString().replace("-", "").substring(0, 9).toUpperCase(Locale.ROOT);
         iamService.registerSessionForAccount(ACCOUNT_ID, accessKeyId, "secret",
-                "arn:aws:iam::" + ACCOUNT_ID + ":role/expired-session-role", LONG_AGO, null);
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/expired-session-role", expiration, null);
         return accessKeyId;
     }
 
